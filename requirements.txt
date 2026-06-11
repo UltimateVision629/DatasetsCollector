@@ -1,2 +1,6 @@
 numpy>=1.23
 matplotlib>=3.7
+pillow
+joyconrobotics
+lerobot-kinematics
+tensorflow-datasets
