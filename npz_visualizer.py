@@ -243,7 +243,7 @@ def print_info(ep: EpisodeData) -> None:
         print(f"  {key:<{width}}  shape={_shape_text(value):<18} dtype={_dtype_text(value)}")
 
 
-def _normalize_image(frame: np.ndarray, flip_vertical: bool = True) -> np.ndarray:
+def _normalize_image(frame: np.ndarray, flip_horizontal: bool = True, flip_vertical: bool = True) -> np.ndarray:
     img = np.asarray(frame)
     if img.ndim == 2:
         pass
@@ -256,6 +256,8 @@ def _normalize_image(frame: np.ndarray, flip_vertical: bool = True) -> np.ndarra
 
     if flip_vertical and img.ndim >= 2:
         img = np.flipud(img)
+    if flip_horizontal and img.ndim >= 2:
+        img = np.fliplr(img)
 
     if img.dtype == np.uint8:
         return img
@@ -326,7 +328,7 @@ def _preferred_cjk_font() -> Any | None:
     return None
 
 
-def visualize(ep: EpisodeData, fps: float = 30.0, flip_image: bool = True) -> None:
+def visualize(ep: EpisodeData, fps: float = 30.0, flip_horizontal: bool = True, flip_vertical: bool = True) -> None:
     import matplotlib
 
     matplotlib.rcParams["font.sans-serif"] = [
@@ -378,7 +380,7 @@ def visualize(ep: EpisodeData, fps: float = 30.0, flip_image: bool = True) -> No
     ax_speed = fig.add_subplot(gs[4, :])
 
     if has_images:
-        first_image = _normalize_image(images[0], flip_vertical=flip_image)
+        first_image = _normalize_image(images[0], flip_horizontal=flip_horizontal, flip_vertical=flip_vertical)
         image_artist = ax_img.imshow(first_image)
         ax_img.set_title(ep.image_key)
     else:
@@ -463,7 +465,7 @@ def visualize(ep: EpisodeData, fps: float = 30.0, flip_image: bool = True) -> No
         frame = int(np.clip(frame, 0, ep.steps - 1))
         state["frame"] = frame
         if image_artist is not None and has_images:
-            image_artist.set_data(_normalize_image(images[min(frame, images.shape[0] - 1)], flip_vertical=flip_image))
+            image_artist.set_data(_normalize_image(images[min(frame, images.shape[0] - 1)], flip_horizontal=flip_horizontal, flip_vertical=flip_vertical))
         for cursor in cursors:
             cursor.set_xdata([frame, frame])
         episode_line = ""
@@ -545,7 +547,493 @@ def visualize(ep: EpisodeData, fps: float = 30.0, flip_image: bool = True) -> No
     plt.show()
 
 
+class RoboViewApp:
+    def __init__(self, default_dir: str = "demos") -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        import matplotlib
+
+        matplotlib.rcParams["font.sans-serif"] = [
+            "Microsoft YaHei",
+            "SimHei",
+            "SimSun",
+            "Noto Sans CJK SC",
+            "Arial Unicode MS",
+            "DejaVu Sans",
+        ]
+        matplotlib.rcParams["axes.unicode_minus"] = False
+
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+        from matplotlib.figure import Figure
+
+        self.tk = tk
+        self.ttk = ttk
+        self.FigureCanvasTkAgg = FigureCanvasTkAgg
+        self.NavigationToolbar2Tk = NavigationToolbar2Tk
+        self.default_dir = default_dir
+        self.files: list[Path] = []
+        self.episode: EpisodeData | None = None
+        self.frame = 0
+        self.playing = False
+        self.last_tick = time.monotonic()
+        self.frame_accum = 0.0
+        self.cursors: list[Any] = []
+        self.image_artist: Any | None = None
+        self.images: np.ndarray | None = None
+        self.has_images = False
+        self.series: dict[str, np.ndarray | None] = {}
+        self.cjk_font = _preferred_cjk_font()
+
+        self.root = tk.Tk()
+        self.root.title("RoboView NPZ Visualizer")
+        self.root.geometry("1500x920")
+        self.root.minsize(1180, 760)
+
+        self.status_var = tk.StringVar(value="导入一个 .npz 文件，或导入包含 .npz 的文件夹。")
+        self.fps_var = tk.DoubleVar(value=30.0)
+        self.flip_horiz_var = tk.BooleanVar(value=True)
+        self.flip_vert_var = tk.BooleanVar(value=True)
+        self.step_var = tk.IntVar(value=0)
+        self.step_label_var = tk.StringVar(value="0 / 0")
+        self.speed_label_var = tk.StringVar(value="30 fps")
+
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+
+        self._build_layout(Figure)
+        self._bind_events()
+        self._load_default_dir()
+        self.root.after(16, self._tick)
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+    def _build_layout(self, Figure: Any) -> None:
+        tk = self.tk
+        ttk = self.ttk
+
+        main = ttk.PanedWindow(self.root, orient="horizontal")
+        main.grid(row=0, column=0, sticky="nsew")
+
+        sidebar = ttk.Frame(main, padding=10)
+        workspace = ttk.Frame(main, padding=(8, 8, 10, 8))
+        main.add(sidebar, weight=0)
+        main.add(workspace, weight=1)
+
+        sidebar.columnconfigure(0, weight=1)
+        sidebar.rowconfigure(2, weight=1)
+        workspace.columnconfigure(0, weight=1)
+        workspace.rowconfigure(0, weight=1)
+
+        title = ttk.Label(sidebar, text="RoboView", font=("Segoe UI", 18, "bold"))
+        title.grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        buttons = ttk.Frame(sidebar)
+        buttons.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        buttons.columnconfigure(0, weight=1)
+        buttons.columnconfigure(1, weight=1)
+
+        ttk.Button(buttons, text="导入 NPZ", command=self._open_npz).grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        ttk.Button(buttons, text="导入文件夹", command=self._open_folder).grid(row=0, column=1, sticky="ew", padx=(5, 0))
+
+        self.tree = ttk.Treeview(
+            sidebar,
+            columns=("steps", "image", "task"),
+            show="tree headings",
+            height=14,
+            selectmode="browse",
+        )
+        self.tree.heading("#0", text="文件")
+        self.tree.heading("steps", text="帧")
+        self.tree.heading("image", text="图像")
+        self.tree.heading("task", text="任务")
+        self.tree.column("#0", width=280, minwidth=180)
+        self.tree.column("steps", width=55, anchor="center")
+        self.tree.column("image", width=110, anchor="center")
+        self.tree.column("task", width=110, anchor="center")
+        self.tree.grid(row=2, column=0, sticky="nsew")
+
+        tree_scroll = ttk.Scrollbar(sidebar, orient="vertical", command=self.tree.yview)
+        tree_scroll.grid(row=2, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=tree_scroll.set)
+
+        controls = ttk.LabelFrame(sidebar, text="播放控制", padding=10)
+        controls.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        controls.columnconfigure(1, weight=1)
+
+        self.play_button = ttk.Button(controls, text="播放", command=self._toggle_play)
+        self.play_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(controls, text="重置", command=self._reset_frame).grid(row=0, column=1, sticky="ew")
+
+        ttk.Label(controls, text="帧").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.step_scale = ttk.Scale(controls, from_=0, to=0, variable=self.step_var, orient="horizontal", command=self._on_step_scale)
+        self.step_scale.grid(row=1, column=1, sticky="ew", pady=(10, 0))
+        ttk.Label(controls, textvariable=self.step_label_var).grid(row=2, column=1, sticky="e")
+
+        ttk.Label(controls, text="速度").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.fps_scale = ttk.Scale(controls, from_=1, to=120, variable=self.fps_var, orient="horizontal", command=self._on_fps_scale)
+        self.fps_scale.grid(row=3, column=1, sticky="ew", pady=(8, 0))
+        ttk.Label(controls, textvariable=self.speed_label_var).grid(row=4, column=1, sticky="e")
+
+        ttk.Checkbutton(controls, text="水平翻转图像", variable=self.flip_horiz_var, command=self._refresh_frame).grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
+        ttk.Checkbutton(controls, text="垂直翻转图像", variable=self.flip_vert_var, command=self._refresh_frame).grid(
+            row=6, column=0, columnspan=2, sticky="w"
+        )
+
+        info_frame = ttk.LabelFrame(sidebar, text="基础信息", padding=8)
+        info_frame.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
+        info_frame.columnconfigure(0, weight=1)
+        sidebar.rowconfigure(4, weight=1)
+
+        self.info_text = tk.Text(info_frame, height=12, wrap="none", font=("Consolas", 9))
+        self.info_text.grid(row=0, column=0, sticky="nsew")
+        self.info_text.configure(state="disabled")
+        info_scroll = ttk.Scrollbar(info_frame, orient="vertical", command=self.info_text.yview)
+        info_scroll.grid(row=0, column=1, sticky="ns")
+        self.info_text.configure(yscrollcommand=info_scroll.set)
+
+        ttk.Label(sidebar, textvariable=self.status_var).grid(row=5, column=0, sticky="ew", pady=(8, 0))
+
+        self.figure = Figure(figsize=(11, 8), dpi=100)
+        self.canvas = self.FigureCanvasTkAgg(self.figure, master=workspace)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        toolbar_frame = ttk.Frame(workspace)
+        toolbar_frame.grid(row=1, column=0, sticky="ew")
+        self.toolbar = self.NavigationToolbar2Tk(self.canvas, toolbar_frame, pack_toolbar=False)
+        self.toolbar.update()
+        self.toolbar.grid(row=0, column=0, sticky="w")
+
+        self._show_empty_canvas()
+
+    def _bind_events(self) -> None:
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        self.tree.bind("<Double-1>", self._on_tree_select)
+        self.root.bind("<space>", lambda _event: self._toggle_play())
+        self.root.bind("<Left>", lambda _event: self._set_frame(self.frame - 1))
+        self.root.bind("<Right>", lambda _event: self._set_frame(self.frame + 1))
+        self.root.bind("<Home>", lambda _event: self._set_frame(0))
+        self.root.bind("<End>", lambda _event: self._set_frame((self.episode.steps - 1) if self.episode else 0))
+
+    def _load_default_dir(self) -> None:
+        default_path = Path(self.default_dir)
+        if default_path.exists():
+            try:
+                self._set_files(find_npz_files(default_path))
+            except Exception:
+                pass
+
+    def _open_npz(self) -> None:
+        from tkinter import filedialog, messagebox
+
+        path = filedialog.askopenfilename(
+            title="导入 NPZ 文件",
+            filetypes=[("NPZ files", "*.npz"), ("All files", "*.*")],
+            initialdir=str(Path(self.default_dir).resolve()) if Path(self.default_dir).exists() else str(Path.cwd()),
+        )
+        if not path:
+            return
+        try:
+            self._set_files([Path(path)])
+        except Exception as exc:
+            messagebox.showerror("导入失败", str(exc))
+
+    def _open_folder(self) -> None:
+        from tkinter import filedialog, messagebox
+
+        path = filedialog.askdirectory(
+            title="导入 NPZ 文件夹",
+            initialdir=str(Path(self.default_dir).resolve()) if Path(self.default_dir).exists() else str(Path.cwd()),
+        )
+        if not path:
+            return
+        try:
+            self._set_files(find_npz_files(path))
+        except Exception as exc:
+            messagebox.showerror("导入失败", str(exc))
+
+    def _set_files(self, files: list[Path]) -> None:
+        self.files = files
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        for index, path in enumerate(files):
+            try:
+                ep = load_episode(path)
+                image_shape = _shape_text(ep.arrays[ep.image_key]) if ep.image_key else "n/a"
+                self.tree.insert("", "end", iid=str(index), text=path.name, values=(ep.steps, image_shape, ep.task))
+            except Exception as exc:
+                self.tree.insert("", "end", iid=str(index), text=path.name, values=("ERR", "-", str(exc)))
+
+        self.status_var.set(f"已导入 {len(files)} 个 .npz 文件。请选择一条 episode。")
+        if files:
+            self.tree.selection_set("0")
+            self.tree.focus("0")
+            self._load_selected_episode()
+
+    def _selected_path(self) -> Path | None:
+        selection = self.tree.selection()
+        if not selection:
+            return None
+        index = int(selection[0])
+        if index < 0 or index >= len(self.files):
+            return None
+        return self.files[index]
+
+    def _on_tree_select(self, _event: Any = None) -> None:
+        self._load_selected_episode()
+
+    def _load_selected_episode(self) -> None:
+        from tkinter import messagebox
+
+        path = self._selected_path()
+        if path is None:
+            return
+        try:
+            self.playing = False
+            self.play_button.configure(text="播放")
+            self.episode = load_episode(path)
+            self.frame = 0
+            self.frame_accum = 0.0
+            self._prepare_episode_series()
+            self._render_episode()
+            self._set_frame(0)
+            self._set_info(self._info_text(self.episode))
+            self.status_var.set(f"已加载: {path.name}")
+        except Exception as exc:
+            messagebox.showerror("加载失败", str(exc))
+
+    def _prepare_episode_series(self) -> None:
+        ep = self.episode
+        if ep is None:
+            return
+        action = _series(ep, ep.action_key) if ep.action_key else None
+        self.series = {
+            "action": action,
+            "robot0_joint": _series(ep, "robot0_joint_pos"),
+            "robot1_joint": _series(ep, "robot1_joint_pos"),
+            "robot0_eef_pos": _series(ep, "robot0_eef_pos"),
+            "robot1_eef_pos": _series(ep, "robot1_eef_pos"),
+            "robot0_eef_quat": _series(ep, "robot0_eef_quat"),
+            "robot1_eef_quat": _series(ep, "robot1_eef_quat"),
+            "robot0_grip": _series(ep, "robot0_gripper_qpos"),
+            "robot1_grip": _series(ep, "robot1_gripper_qpos"),
+        }
+        self.images = np.asarray(ep.arrays[ep.image_key]) if ep.image_key else None
+        self.has_images = self.images is not None and self.images.ndim >= 3 and self.images.shape[0] > 0
+
+    def _render_episode(self) -> None:
+        ep = self.episode
+        if ep is None:
+            self._show_empty_canvas()
+            return
+
+        self.figure.clear()
+        gs = self.figure.add_gridspec(3, 3, height_ratios=[1.0, 1.0, 1.0], width_ratios=[1.05, 1.2, 1.2])
+        self.ax_img = self.figure.add_subplot(gs[0:2, 0])
+        self.ax_values = self.figure.add_subplot(gs[2, 0])
+        ax_action_pos = self.figure.add_subplot(gs[0, 1])
+        ax_action_rot = self.figure.add_subplot(gs[0, 2])
+        ax_joint = self.figure.add_subplot(gs[1, 1])
+        ax_eef_pos = self.figure.add_subplot(gs[1, 2])
+        ax_eef_quat = self.figure.add_subplot(gs[2, 1])
+        ax_grip = self.figure.add_subplot(gs[2, 2])
+
+        if self.has_images and self.images is not None:
+            self.image_artist = self.ax_img.imshow(_normalize_image(self.images[0], flip_horizontal=self.flip_horiz_var.get(), flip_vertical=self.flip_vert_var.get()))
+            self.ax_img.set_title(ep.image_key or "camera")
+        else:
+            self.image_artist = None
+            self.ax_img.text(0.5, 0.5, "image key not found", ha="center", va="center", transform=self.ax_img.transAxes)
+            self.ax_img.set_title("camera")
+        self.ax_img.axis("off")
+
+        action = self.series.get("action")
+        action_pos = action[:, [0, 1, 2, 7, 8, 9]] if action is not None and action.shape[1] >= 10 else action
+        action_rot = action[:, [3, 4, 5, 10, 11, 12]] if action is not None and action.shape[1] >= 13 else None
+        _plot_multidim(ax_action_pos, action_pos, ["r_dx", "r_dy", "r_dz", "l_dx", "l_dy", "l_dz"], "Action position deltas")
+        _plot_multidim(ax_action_rot, action_rot, ["r_dRx", "r_dRy", "r_dRz", "l_dRx", "l_dRy", "l_dRz"], "Action rotation deltas")
+
+        joint_series: list[np.ndarray] = []
+        joint_labels: list[str] = []
+        robot0_joint = self.series.get("robot0_joint")
+        robot1_joint = self.series.get("robot1_joint")
+        if robot0_joint is not None:
+            joint_series.append(robot0_joint)
+            joint_labels.extend([f"r_j{i}" for i in range(robot0_joint.shape[1])])
+        if robot1_joint is not None:
+            joint_series.append(robot1_joint)
+            joint_labels.extend([f"l_j{i}" for i in range(robot1_joint.shape[1])])
+        joint = np.concatenate(joint_series, axis=1) if joint_series else None
+        _plot_multidim(ax_joint, joint, joint_labels, "Robot joint positions")
+
+        eef_pos_series: list[np.ndarray] = []
+        eef_pos_labels: list[str] = []
+        robot0_eef_pos = self.series.get("robot0_eef_pos")
+        robot1_eef_pos = self.series.get("robot1_eef_pos")
+        if robot0_eef_pos is not None:
+            eef_pos_series.append(robot0_eef_pos)
+            eef_pos_labels.extend(["r_x", "r_y", "r_z"][: robot0_eef_pos.shape[1]])
+        if robot1_eef_pos is not None:
+            eef_pos_series.append(robot1_eef_pos)
+            eef_pos_labels.extend(["l_x", "l_y", "l_z"][: robot1_eef_pos.shape[1]])
+        eef_pos = np.concatenate(eef_pos_series, axis=1) if eef_pos_series else None
+        _plot_multidim(ax_eef_pos, eef_pos, eef_pos_labels, "End-effector positions")
+
+        eef_quat_series: list[np.ndarray] = []
+        eef_quat_labels: list[str] = []
+        robot0_eef_quat = self.series.get("robot0_eef_quat")
+        robot1_eef_quat = self.series.get("robot1_eef_quat")
+        if robot0_eef_quat is not None:
+            eef_quat_series.append(robot0_eef_quat)
+            eef_quat_labels.extend(["r_qx", "r_qy", "r_qz", "r_qw"][: robot0_eef_quat.shape[1]])
+        if robot1_eef_quat is not None:
+            eef_quat_series.append(robot1_eef_quat)
+            eef_quat_labels.extend(["l_qx", "l_qy", "l_qz", "l_qw"][: robot1_eef_quat.shape[1]])
+        eef_quat = np.concatenate(eef_quat_series, axis=1) if eef_quat_series else None
+        _plot_multidim(ax_eef_quat, eef_quat, eef_quat_labels, "End-effector quaternions")
+
+        grip_series: list[np.ndarray] = []
+        grip_labels: list[str] = []
+        robot0_grip = self.series.get("robot0_grip")
+        robot1_grip = self.series.get("robot1_grip")
+        if robot0_grip is not None:
+            grip_series.append(robot0_grip)
+            grip_labels.extend([f"r_grip{i}" for i in range(robot0_grip.shape[1])])
+        if robot1_grip is not None:
+            grip_series.append(robot1_grip)
+            grip_labels.extend([f"l_grip{i}" for i in range(robot1_grip.shape[1])])
+        if action is not None and action.shape[1] >= 14:
+            grip_series.append(action[:, [6, 13]])
+            grip_labels.extend(["r_action_grip", "l_action_grip"])
+        grip = np.concatenate(grip_series, axis=1) if grip_series else None
+        _plot_multidim(ax_grip, grip, grip_labels, "Gripper values")
+
+        self.plot_axes = [ax_action_pos, ax_action_rot, ax_joint, ax_eef_pos, ax_eef_quat, ax_grip]
+        self.cursors = [ax.axvline(0, color="black", linestyle="--", linewidth=1.0, alpha=0.75) for ax in self.plot_axes]
+        self.ax_values.axis("off")
+        text_kwargs = {"fontproperties": self.cjk_font} if self.cjk_font is not None else {"family": "monospace"}
+        self.value_artist = self.ax_values.text(0.0, 1.0, "", va="top", fontsize=8.5, **text_kwargs)
+
+        self.figure.suptitle(f"{ep.path.name} | {ep.task}", fontsize=12)
+        self.figure.subplots_adjust(left=0.035, right=0.985, bottom=0.045, top=0.925, wspace=0.30, hspace=0.45)
+        self.step_scale.configure(to=max(0, ep.steps - 1))
+        self.canvas.draw_idle()
+
+    def _show_empty_canvas(self) -> None:
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        ax.axis("off")
+        ax.text(0.5, 0.5, "导入 NPZ 后开始分析", ha="center", va="center", fontsize=16)
+        self.canvas.draw_idle()
+
+    def _info_text(self, ep: EpisodeData) -> str:
+        lines = [
+            f"文件: {ep.path}",
+            f"任务: {ep.task}",
+            f"成功: {ep.success}",
+            f"步数: {ep.steps}",
+            f"图像: {ep.image_key or 'not found'}",
+            f"动作: {ep.action_key or 'not found'}",
+            "",
+            "数组:",
+        ]
+        width = max((len(key) for key in ep.arrays), default=4)
+        for key in sorted(ep.arrays):
+            value = ep.arrays[key]
+            lines.append(f"  {key:<{width}}  shape={_shape_text(value):<18} dtype={_dtype_text(value)}")
+        return "\n".join(lines)
+
+    def _set_info(self, text: str) -> None:
+        self.info_text.configure(state="normal")
+        self.info_text.delete("1.0", "end")
+        self.info_text.insert("1.0", text)
+        self.info_text.configure(state="disabled")
+
+    def _set_frame(self, frame: int) -> None:
+        ep = self.episode
+        if ep is None or ep.steps <= 0:
+            return
+        frame = int(np.clip(frame, 0, ep.steps - 1))
+        self.frame = frame
+        self.step_var.set(frame)
+        self.frame_accum = 0.0
+        self._refresh_frame()
+
+    def _refresh_frame(self) -> None:
+        ep = self.episode
+        if ep is None:
+            return
+        frame = int(np.clip(self.frame, 0, ep.steps - 1))
+        if self.image_artist is not None and self.has_images and self.images is not None:
+            self.image_artist.set_data(
+                _normalize_image(self.images[min(frame, self.images.shape[0] - 1)], flip_horizontal=self.flip_horiz_var.get(), flip_vertical=self.flip_vert_var.get())
+            )
+        for cursor in self.cursors:
+            cursor.set_xdata([frame, frame])
+
+        value_lines = [
+            f"step: {frame + 1}/{ep.steps}",
+            _format_values("action", self.series.get("action"), frame, 14),
+            _format_values("r_joint", self.series.get("robot0_joint"), frame),
+            _format_values("l_joint", self.series.get("robot1_joint"), frame),
+            _format_values("r_eef_pos", self.series.get("robot0_eef_pos"), frame, 3),
+            _format_values("l_eef_pos", self.series.get("robot1_eef_pos"), frame, 3),
+        ]
+        if hasattr(self, "value_artist"):
+            self.value_artist.set_text("\n".join(value_lines))
+        self.step_label_var.set(f"{frame + 1} / {ep.steps}")
+        self.canvas.draw_idle()
+
+    def _on_step_scale(self, value: str) -> None:
+        if self.episode is None:
+            return
+        self.frame = int(float(value))
+        self.frame_accum = 0.0
+        self._refresh_frame()
+
+    def _on_fps_scale(self, value: str) -> None:
+        self.speed_label_var.set(f"{float(value):.0f} fps")
+
+    def _toggle_play(self) -> None:
+        if self.episode is None:
+            return
+        self.playing = not self.playing
+        self.play_button.configure(text="暂停" if self.playing else "播放")
+        self.last_tick = time.monotonic()
+        self.frame_accum = 0.0
+
+    def _reset_frame(self) -> None:
+        self.playing = False
+        self.play_button.configure(text="播放")
+        self._set_frame(0)
+
+    def _tick(self) -> None:
+        if self.playing and self.episode is not None:
+            now = time.monotonic()
+            elapsed = now - self.last_tick
+            self.last_tick = now
+            self.frame_accum += elapsed * max(1.0, float(self.fps_var.get()))
+            step_count = int(self.frame_accum)
+            if step_count > 0:
+                self.frame_accum -= step_count
+                next_frame = self.frame + step_count
+                if next_frame >= self.episode.steps:
+                    next_frame %= self.episode.steps
+                self._set_frame(next_frame)
+        else:
+            self.last_tick = time.monotonic()
+        self.root.after(16, self._tick)
+
+
 def launch_import_app(default_dir: str = "demos") -> None:
+    app = RoboViewApp(default_dir=default_dir)
+    app.run()
+
+
+def launch_legacy_import_app(default_dir: str = "demos") -> None:
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
 
@@ -556,7 +1044,8 @@ def launch_import_app(default_dir: str = "demos") -> None:
     files: list[Path] = []
     selected_file = tk.StringVar(value="")
     fps_var = tk.DoubleVar(value=30.0)
-    flip_var = tk.BooleanVar(value=True)
+    flip_horiz_var = tk.BooleanVar(value=True)
+    flip_vert_var = tk.BooleanVar(value=True)
     status_var = tk.StringVar(value="导入一个 .npz 文件，或导入包含 .npz 的文件夹。")
 
     root.columnconfigure(0, weight=1)
@@ -672,7 +1161,7 @@ def launch_import_app(default_dir: str = "demos") -> None:
         try:
             ep = load_episode(path)
             print_info(ep)
-            visualize(ep, fps=fps_var.get(), flip_image=flip_var.get())
+            visualize(ep, fps=fps_var.get(), flip_horizontal=flip_horiz_var.get(), flip_vertical=flip_vert_var.get())
         except Exception as exc:
             messagebox.showerror("分析失败", str(exc))
 
@@ -682,7 +1171,8 @@ def launch_import_app(default_dir: str = "demos") -> None:
     ttk.Label(toolbar, text="播放速度 fps").grid(row=0, column=3, padx=(0, 6))
     ttk.Scale(toolbar, from_=1, to=120, variable=fps_var, orient="horizontal", length=180).grid(row=0, column=4)
     ttk.Label(toolbar, textvariable=fps_var, width=6).grid(row=0, column=5, sticky="w", padx=(6, 16))
-    ttk.Checkbutton(toolbar, text="垂直翻转图像", variable=flip_var).grid(row=0, column=6, padx=(0, 8))
+    ttk.Checkbutton(toolbar, text="水平翻转", variable=flip_horiz_var).grid(row=0, column=6, padx=(0, 4))
+    ttk.Checkbutton(toolbar, text="垂直翻转", variable=flip_vert_var).grid(row=0, column=7, padx=(0, 8))
 
     ttk.Label(bottom, textvariable=status_var).grid(row=1, column=0, sticky="w", pady=(8, 0))
     file_list.bind("<<ListboxSelect>>", show_selected_info)
@@ -715,7 +1205,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="1-based episode index to open when path is a directory.",
     )
     parser.add_argument("--concat-all", action="store_true", help="Merge all episodes in a directory into one timeline.")
-    parser.add_argument("--no-flip-image", action="store_true", help="Do not vertically flip camera frames.")
+    parser.add_argument("--no-flip-horizontal", action="store_true", help="Do not horizontally flip camera frames.")
+    parser.add_argument("--no-flip-vertical", action="store_true", help="Do not vertically flip camera frames.")
     parser.add_argument("--list", action="store_true", help="List episodes and exit.")
     parser.add_argument("--info-only", action="store_true", help="Only print metadata; do not open the GUI.")
     parser.add_argument("--fps", type=float, default=30.0, help="Playback speed for the GUI.")
@@ -731,7 +1222,8 @@ def main(argv: list[str] | None = None) -> int:
             and not args.info_only
             and not args.concat_all
             and args.episode_index is None
-            and not args.no_flip_image
+            and not args.no_flip_horizontal
+            and not args.no_flip_vertical
             and float(args.fps) == 30.0
         )
         if args.app or wants_plain_app:
@@ -755,7 +1247,7 @@ def main(argv: list[str] | None = None) -> int:
             ep = load_episode(files[episode_index - 1])
         print_info(ep)
         if not args.info_only:
-            visualize(ep, fps=args.fps, flip_image=not args.no_flip_image)
+            visualize(ep, fps=args.fps, flip_horizontal=not args.no_flip_horizontal, flip_vertical=not args.no_flip_vertical)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
