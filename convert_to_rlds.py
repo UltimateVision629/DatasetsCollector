@@ -17,12 +17,11 @@ import os
 from typing import Dict, List
 
 import numpy as np
-import tensorflow_datasets as tfds
 
 
 def load_trajectories(input_dir: str) -> List[dict]:
     """Load all .npz files from input_dir."""
-    files = sorted(glob.glob(os.path.join(input_dir, "*.npz")))
+    files = sorted(glob.glob(os.path.join(input_dir, "**/*.npz"), recursive=True))
     print(f"Found {len(files)} trajectories in {input_dir}")
     trajectories = []
     for f in files:
@@ -99,6 +98,8 @@ def build_rlds_dataset(trajectories: List[dict], output_dir: str):
     Uses the RLDS episode format expected by VLA-Adapter:
     https://github.com/google-research/rlds
     """
+    import tensorflow_datasets as tfds
+
     os.makedirs(output_dir, exist_ok=True)
 
     # Build TFDS dataset
