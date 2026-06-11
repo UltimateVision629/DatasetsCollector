@@ -243,7 +243,7 @@ def print_info(ep: EpisodeData) -> None:
         print(f"  {key:<{width}}  shape={_shape_text(value):<18} dtype={_dtype_text(value)}")
 
 
-def _normalize_image(frame: np.ndarray, flip_vertical: bool = True) -> np.ndarray:
+def _normalize_image(frame: np.ndarray, flip_horizontal: bool = True, flip_vertical: bool = True) -> np.ndarray:
     img = np.asarray(frame)
     if img.ndim == 2:
         pass
@@ -256,6 +256,8 @@ def _normalize_image(frame: np.ndarray, flip_vertical: bool = True) -> np.ndarra
 
     if flip_vertical and img.ndim >= 2:
         img = np.flipud(img)
+    if flip_horizontal and img.ndim >= 2:
+        img = np.fliplr(img)
 
     if img.dtype == np.uint8:
         return img
@@ -326,7 +328,7 @@ def _preferred_cjk_font() -> Any | None:
     return None
 
 
-def visualize(ep: EpisodeData, fps: float = 30.0, flip_image: bool = True) -> None:
+def visualize(ep: EpisodeData, fps: float = 30.0, flip_horizontal: bool = True, flip_vertical: bool = True) -> None:
     import matplotlib
 
     matplotlib.rcParams["font.sans-serif"] = [
@@ -378,7 +380,7 @@ def visualize(ep: EpisodeData, fps: float = 30.0, flip_image: bool = True) -> No
     ax_speed = fig.add_subplot(gs[4, :])
 
     if has_images:
-        first_image = _normalize_image(images[0], flip_vertical=flip_image)
+        first_image = _normalize_image(images[0], flip_horizontal=flip_horizontal, flip_vertical=flip_vertical)
         image_artist = ax_img.imshow(first_image)
         ax_img.set_title(ep.image_key)
     else:
@@ -463,7 +465,7 @@ def visualize(ep: EpisodeData, fps: float = 30.0, flip_image: bool = True) -> No
         frame = int(np.clip(frame, 0, ep.steps - 1))
         state["frame"] = frame
         if image_artist is not None and has_images:
-            image_artist.set_data(_normalize_image(images[min(frame, images.shape[0] - 1)], flip_vertical=flip_image))
+            image_artist.set_data(_normalize_image(images[min(frame, images.shape[0] - 1)], flip_horizontal=flip_horizontal, flip_vertical=flip_vertical))
         for cursor in cursors:
             cursor.set_xdata([frame, frame])
         episode_line = ""
@@ -590,7 +592,8 @@ class RoboViewApp:
 
         self.status_var = tk.StringVar(value="导入一个 .npz 文件，或导入包含 .npz 的文件夹。")
         self.fps_var = tk.DoubleVar(value=30.0)
-        self.flip_var = tk.BooleanVar(value=True)
+        self.flip_horiz_var = tk.BooleanVar(value=True)
+        self.flip_vert_var = tk.BooleanVar(value=True)
         self.step_var = tk.IntVar(value=0)
         self.step_label_var = tk.StringVar(value="0 / 0")
         self.speed_label_var = tk.StringVar(value="30 fps")
@@ -673,8 +676,11 @@ class RoboViewApp:
         self.fps_scale.grid(row=3, column=1, sticky="ew", pady=(8, 0))
         ttk.Label(controls, textvariable=self.speed_label_var).grid(row=4, column=1, sticky="e")
 
-        ttk.Checkbutton(controls, text="垂直翻转图像", variable=self.flip_var, command=self._refresh_frame).grid(
+        ttk.Checkbutton(controls, text="水平翻转图像", variable=self.flip_horiz_var, command=self._refresh_frame).grid(
             row=5, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
+        ttk.Checkbutton(controls, text="垂直翻转图像", variable=self.flip_vert_var, command=self._refresh_frame).grid(
+            row=6, column=0, columnspan=2, sticky="w"
         )
 
         info_frame = ttk.LabelFrame(sidebar, text="基础信息", padding=8)
@@ -836,7 +842,7 @@ class RoboViewApp:
         ax_grip = self.figure.add_subplot(gs[2, 2])
 
         if self.has_images and self.images is not None:
-            self.image_artist = self.ax_img.imshow(_normalize_image(self.images[0], flip_vertical=self.flip_var.get()))
+            self.image_artist = self.ax_img.imshow(_normalize_image(self.images[0], flip_horizontal=self.flip_horiz_var.get(), flip_vertical=self.flip_vert_var.get()))
             self.ax_img.set_title(ep.image_key or "camera")
         else:
             self.image_artist = None
@@ -963,7 +969,7 @@ class RoboViewApp:
         frame = int(np.clip(self.frame, 0, ep.steps - 1))
         if self.image_artist is not None and self.has_images and self.images is not None:
             self.image_artist.set_data(
-                _normalize_image(self.images[min(frame, self.images.shape[0] - 1)], flip_vertical=self.flip_var.get())
+                _normalize_image(self.images[min(frame, self.images.shape[0] - 1)], flip_horizontal=self.flip_horiz_var.get(), flip_vertical=self.flip_vert_var.get())
             )
         for cursor in self.cursors:
             cursor.set_xdata([frame, frame])
@@ -1038,7 +1044,8 @@ def launch_legacy_import_app(default_dir: str = "demos") -> None:
     files: list[Path] = []
     selected_file = tk.StringVar(value="")
     fps_var = tk.DoubleVar(value=30.0)
-    flip_var = tk.BooleanVar(value=True)
+    flip_horiz_var = tk.BooleanVar(value=True)
+    flip_vert_var = tk.BooleanVar(value=True)
     status_var = tk.StringVar(value="导入一个 .npz 文件，或导入包含 .npz 的文件夹。")
 
     root.columnconfigure(0, weight=1)
@@ -1154,7 +1161,7 @@ def launch_legacy_import_app(default_dir: str = "demos") -> None:
         try:
             ep = load_episode(path)
             print_info(ep)
-            visualize(ep, fps=fps_var.get(), flip_image=flip_var.get())
+            visualize(ep, fps=fps_var.get(), flip_horizontal=flip_horiz_var.get(), flip_vertical=flip_vert_var.get())
         except Exception as exc:
             messagebox.showerror("分析失败", str(exc))
 
@@ -1164,7 +1171,8 @@ def launch_legacy_import_app(default_dir: str = "demos") -> None:
     ttk.Label(toolbar, text="播放速度 fps").grid(row=0, column=3, padx=(0, 6))
     ttk.Scale(toolbar, from_=1, to=120, variable=fps_var, orient="horizontal", length=180).grid(row=0, column=4)
     ttk.Label(toolbar, textvariable=fps_var, width=6).grid(row=0, column=5, sticky="w", padx=(6, 16))
-    ttk.Checkbutton(toolbar, text="垂直翻转图像", variable=flip_var).grid(row=0, column=6, padx=(0, 8))
+    ttk.Checkbutton(toolbar, text="水平翻转", variable=flip_horiz_var).grid(row=0, column=6, padx=(0, 4))
+    ttk.Checkbutton(toolbar, text="垂直翻转", variable=flip_vert_var).grid(row=0, column=7, padx=(0, 8))
 
     ttk.Label(bottom, textvariable=status_var).grid(row=1, column=0, sticky="w", pady=(8, 0))
     file_list.bind("<<ListboxSelect>>", show_selected_info)
@@ -1197,7 +1205,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="1-based episode index to open when path is a directory.",
     )
     parser.add_argument("--concat-all", action="store_true", help="Merge all episodes in a directory into one timeline.")
-    parser.add_argument("--no-flip-image", action="store_true", help="Do not vertically flip camera frames.")
+    parser.add_argument("--no-flip-horizontal", action="store_true", help="Do not horizontally flip camera frames.")
+    parser.add_argument("--no-flip-vertical", action="store_true", help="Do not vertically flip camera frames.")
     parser.add_argument("--list", action="store_true", help="List episodes and exit.")
     parser.add_argument("--info-only", action="store_true", help="Only print metadata; do not open the GUI.")
     parser.add_argument("--fps", type=float, default=30.0, help="Playback speed for the GUI.")
@@ -1213,7 +1222,8 @@ def main(argv: list[str] | None = None) -> int:
             and not args.info_only
             and not args.concat_all
             and args.episode_index is None
-            and not args.no_flip_image
+            and not args.no_flip_horizontal
+            and not args.no_flip_vertical
             and float(args.fps) == 30.0
         )
         if args.app or wants_plain_app:
@@ -1237,7 +1247,7 @@ def main(argv: list[str] | None = None) -> int:
             ep = load_episode(files[episode_index - 1])
         print_info(ep)
         if not args.info_only:
-            visualize(ep, fps=args.fps, flip_image=not args.no_flip_image)
+            visualize(ep, fps=args.fps, flip_horizontal=not args.no_flip_horizontal, flip_vertical=not args.no_flip_vertical)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
