@@ -27,7 +27,7 @@ Workflow:
   4. Press A button → save trajectory as successful episode
   5. Press Y button → discard and restart episode
 
-Output: trajectories saved to C:\\vla\\network\\demos\\ as .npz files
+Output: trajectories saved to ../network/demos/ as .npz files
 Action format (matching VLA-Adapter LIBERO OSC_POSE):
   - Per arm: [dx, dy, dz, dRx, dRy, dRz, gripper] (7-dim EEF delta)
   - Dual-arm: concatenated [arm0:7, arm1:7] = 14-dim

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is the data collection side of a dual-arm robotic block-grasping system. It uses Joy-Con teleop to control SO100 robots in Unity via TCP, records (observation, action) trajectories as `.npz` files, and provides format conversion for training.
 
-The Unity simulator lives at `C:\vla\libero-unity` and the ML training side at `C:\vla\network`.
+The Unity simulator lives at `../libero-unity` and the ML training side at `../network`.
 
 ## Project structure
 
