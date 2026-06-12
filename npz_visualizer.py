@@ -507,6 +507,11 @@ def visualize(ep: EpisodeData, fps: float = 30.0, flip_horizontal: bool = True, 
     def on_key(event: Any) -> None:
         if event.key in (" ", "space"):
             on_play(event)
+        elif event.key == "f11":
+            try:
+                fig.canvas.manager.full_screen_toggle()
+            except Exception:
+                pass
         elif event.key in ("right", "d"):
             slider.set_val(min(ep.steps - 1, state["frame"] + 1))
         elif event.key in ("left", "a"):
@@ -589,6 +594,11 @@ class RoboViewApp:
         self.root.title("RoboView NPZ Visualizer")
         self.root.geometry("1500x920")
         self.root.minsize(1180, 760)
+        self._fullscreen = False
+        self._saved_geometry = ""
+        self._sidebar = None
+        self._main_pane = None
+        self._image_only = False
 
         self.status_var = tk.StringVar(value="导入一个 .npz 文件，或导入包含 .npz 的文件夹。")
         self.fps_var = tk.DoubleVar(value=30.0)
@@ -613,13 +623,13 @@ class RoboViewApp:
         tk = self.tk
         ttk = self.ttk
 
-        main = ttk.PanedWindow(self.root, orient="horizontal")
-        main.grid(row=0, column=0, sticky="nsew")
+        self._main_pane = ttk.PanedWindow(self.root, orient="horizontal")
+        self._main_pane.grid(row=0, column=0, sticky="nsew")
 
-        sidebar = ttk.Frame(main, padding=10)
-        workspace = ttk.Frame(main, padding=(8, 8, 10, 8))
-        main.add(sidebar, weight=0)
-        main.add(workspace, weight=1)
+        self._sidebar = sidebar = ttk.Frame(self._main_pane, padding=10)
+        workspace = ttk.Frame(self._main_pane, padding=(8, 8, 10, 8))
+        self._main_pane.add(sidebar, weight=0)
+        self._main_pane.add(workspace, weight=1)
 
         sidebar.columnconfigure(0, weight=1)
         sidebar.rowconfigure(2, weight=1)
@@ -663,8 +673,10 @@ class RoboViewApp:
         controls.columnconfigure(1, weight=1)
 
         self.play_button = ttk.Button(controls, text="播放", command=self._toggle_play)
-        self.play_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(controls, text="重置", command=self._reset_frame).grid(row=0, column=1, sticky="ew")
+        self.play_button.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        ttk.Button(controls, text="重置", command=self._reset_frame).grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        self.fullscreen_btn = ttk.Button(controls, text="全屏", command=self._toggle_fullscreen)
+        self.fullscreen_btn.grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
         ttk.Label(controls, text="帧").grid(row=1, column=0, sticky="w", pady=(10, 0))
         self.step_scale = ttk.Scale(controls, from_=0, to=0, variable=self.step_var, orient="horizontal", command=self._on_step_scale)
@@ -683,6 +695,9 @@ class RoboViewApp:
             row=6, column=0, columnspan=2, sticky="w"
         )
 
+        self.image_only_btn = ttk.Button(controls, text="仅图像", command=self._toggle_image_only)
+        self.image_only_btn.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
         info_frame = ttk.LabelFrame(sidebar, text="基础信息", padding=8)
         info_frame.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
         info_frame.columnconfigure(0, weight=1)
@@ -699,7 +714,9 @@ class RoboViewApp:
 
         self.figure = Figure(figsize=(11, 8), dpi=100)
         self.canvas = self.FigureCanvasTkAgg(self.figure, master=workspace)
-        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        canvas_widget = self.canvas.get_tk_widget()
+        canvas_widget.grid(row=0, column=0, sticky="nsew")
+        canvas_widget.bind("<Configure>", lambda _e: self._on_canvas_configure(), add="+")
         toolbar_frame = ttk.Frame(workspace)
         toolbar_frame.grid(row=1, column=0, sticky="ew")
         self.toolbar = self.NavigationToolbar2Tk(self.canvas, toolbar_frame, pack_toolbar=False)
@@ -716,6 +733,8 @@ class RoboViewApp:
         self.root.bind("<Right>", lambda _event: self._set_frame(self.frame + 1))
         self.root.bind("<Home>", lambda _event: self._set_frame(0))
         self.root.bind("<End>", lambda _event: self._set_frame((self.episode.steps - 1) if self.episode else 0))
+        self.root.bind_all("<F11>", lambda _event: self._toggle_fullscreen())
+        self.root.bind_all("<Escape>", lambda _event: self._exit_fullscreen())
 
     def _load_default_dir(self) -> None:
         default_path = Path(self.default_dir)
@@ -824,6 +843,13 @@ class RoboViewApp:
         self.images = np.asarray(ep.arrays[ep.image_key]) if ep.image_key else None
         self.has_images = self.images is not None and self.images.ndim >= 3 and self.images.shape[0] > 0
 
+    def _toggle_image_only(self) -> None:
+        self._image_only = not self._image_only
+        self.image_only_btn.configure(text="全部" if self._image_only else "仅图像")
+        if self.episode is not None:
+            self._render_episode()
+            self._refresh_frame()
+
     def _render_episode(self) -> None:
         ep = self.episode
         if ep is None:
@@ -831,6 +857,36 @@ class RoboViewApp:
             return
 
         self.figure.clear()
+
+        if self._image_only:
+            self._render_image_only(ep)
+        else:
+            self._render_full(ep)
+
+        self.step_scale.configure(to=max(0, ep.steps - 1))
+        self.root.after(50, self._resize_figure_to_canvas)
+        self.canvas.draw_idle()
+
+    def _render_image_only(self, ep: EpisodeData) -> None:
+        self.ax_img = self.figure.add_subplot(111)
+        self.ax_img.axis("off")
+
+        if self.has_images and self.images is not None:
+            self.image_artist = self.ax_img.imshow(
+                _normalize_image(self.images[0], flip_horizontal=self.flip_horiz_var.get(), flip_vertical=self.flip_vert_var.get())
+            )
+        else:
+            self.image_artist = None
+            self.ax_img.text(0.5, 0.5, "image key not found", ha="center", va="center", fontsize=16)
+
+        self.plot_axes = []
+        self.cursors = []
+        self.value_artist = None
+
+        self.figure.suptitle(f"{ep.path.name}  |  {ep.task}", fontsize=12)
+        self.figure.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.95)
+
+    def _render_full(self, ep: EpisodeData) -> None:
         gs = self.figure.add_gridspec(3, 3, height_ratios=[1.0, 1.0, 1.0], width_ratios=[1.05, 1.2, 1.2])
         self.ax_img = self.figure.add_subplot(gs[0:2, 0])
         self.ax_values = self.figure.add_subplot(gs[2, 0])
@@ -842,7 +898,9 @@ class RoboViewApp:
         ax_grip = self.figure.add_subplot(gs[2, 2])
 
         if self.has_images and self.images is not None:
-            self.image_artist = self.ax_img.imshow(_normalize_image(self.images[0], flip_horizontal=self.flip_horiz_var.get(), flip_vertical=self.flip_vert_var.get()))
+            self.image_artist = self.ax_img.imshow(
+                _normalize_image(self.images[0], flip_horizontal=self.flip_horiz_var.get(), flip_vertical=self.flip_vert_var.get())
+            )
             self.ax_img.set_title(ep.image_key or "camera")
         else:
             self.image_artist = None
@@ -919,8 +977,6 @@ class RoboViewApp:
 
         self.figure.suptitle(f"{ep.path.name} | {ep.task}", fontsize=12)
         self.figure.subplots_adjust(left=0.035, right=0.985, bottom=0.045, top=0.925, wspace=0.30, hspace=0.45)
-        self.step_scale.configure(to=max(0, ep.steps - 1))
-        self.canvas.draw_idle()
 
     def _show_empty_canvas(self) -> None:
         self.figure.clear()
@@ -982,7 +1038,7 @@ class RoboViewApp:
             _format_values("r_eef_pos", self.series.get("robot0_eef_pos"), frame, 3),
             _format_values("l_eef_pos", self.series.get("robot1_eef_pos"), frame, 3),
         ]
-        if hasattr(self, "value_artist"):
+        if self.value_artist is not None:
             self.value_artist.set_text("\n".join(value_lines))
         self.step_label_var.set(f"{frame + 1} / {ep.steps}")
         self.canvas.draw_idle()
@@ -1009,6 +1065,71 @@ class RoboViewApp:
         self.playing = False
         self.play_button.configure(text="播放")
         self._set_frame(0)
+
+    def _toggle_fullscreen(self) -> None:
+        if self._fullscreen:
+            self._exit_fullscreen()
+        else:
+            self._enter_fullscreen()
+
+    def _enter_fullscreen(self) -> None:
+        if self._fullscreen:
+            return
+        self._fullscreen = True
+        self._saved_geometry = self.root.geometry()
+        self.fullscreen_btn.configure(text="窗口")
+        if self._sidebar is not None and self._main_pane is not None:
+            self._main_pane.forget(self._sidebar)
+        try:
+            self.root.state("zoomed")
+        except Exception:
+            pass
+        self.root.update_idletasks()
+        self.root.after(200, self._resize_figure_to_canvas)
+
+    def _exit_fullscreen(self) -> None:
+        if not self._fullscreen:
+            return
+        self._fullscreen = False
+        try:
+            self.root.state("normal")
+        except Exception:
+            pass
+        if self._sidebar is not None and self._main_pane is not None:
+            try:
+                self._main_pane.insert(0, self._sidebar, weight=0)
+            except Exception:
+                pass
+        self.fullscreen_btn.configure(text="全屏")
+        if self._saved_geometry:
+            try:
+                self.root.geometry(self._saved_geometry)
+            except Exception:
+                pass
+        self.root.update_idletasks()
+        self.root.after(200, self._resize_figure_to_canvas)
+
+    def _on_canvas_configure(self, event: Any = None) -> None:
+        if getattr(self, "_configure_guard", False):
+            return
+        self._configure_guard = True
+        try:
+            w = self.canvas.get_tk_widget().winfo_width()
+            h = self.canvas.get_tk_widget().winfo_height()
+            dpi = self.figure.get_dpi()
+            if w > 100 and h > 100:
+                cur_w, cur_h = self.figure.get_size_inches()
+                new_w, new_h = w / dpi, h / dpi
+                if abs(cur_w - new_w) > 0.3 or abs(cur_h - new_h) > 0.3:
+                    self.figure.set_size_inches(new_w, new_h, forward=True)
+                    self.canvas.draw_idle()
+        except Exception:
+            pass
+        finally:
+            self._configure_guard = False
+
+    def _resize_figure_to_canvas(self) -> None:
+        self._on_canvas_configure()
 
     def _tick(self) -> None:
         if self.playing and self.episode is not None:

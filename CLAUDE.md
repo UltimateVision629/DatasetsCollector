@@ -149,6 +149,61 @@ Output:
 - `dataset/trajectories/trajectory_XXXXXX.npz` — per-timestep keys (`obs/agentview_image/{t}`, `action/{t}`, etc.)
 - `dataset/dataset_statistics.json` — norm stats for training
 
+## RoboView visualizer (npz_visualizer.py)
+
+The visualizer has two code paths sharing the same data-loading and plotting utilities:
+
+### Entry points
+
+| Path | Entry | Window |
+|------|-------|--------|
+| `python npz_visualizer.py` (no args) | `main()` → `launch_import_app()` → `RoboViewApp` | tkinter import window → embedded-matplotlib analysis window |
+| `python npz_visualizer.py demos --episode-index 1` | `main()` → `visualize(ep)` | pure matplotlib `plt.show()` window |
+| `python npz_visualizer.py <file.npz>` | `main()` → `visualize(ep)` | pure matplotlib |
+
+### Key classes
+
+- **`EpisodeData`** (line 48): parsed NPZ with typed attributes (path, steps, image_key, action_key, task, success, arrays)
+- **`RoboViewApp`** (line 555): the main analysis GUI — tkinter `Tk` window with a sidebar (file list, playback controls, flip checkboxes, info panel) and a workspace containing an embedded `matplotlib.figure.Figure` via `FigureCanvasTkAgg`
+- **`SelectedEpisodes`** (line 59): selectable episode list for the legacy import window
+
+### Image flip (horizontal + vertical)
+
+The `_normalize_image()` function (line 246) applies flips in this order:
+1. `np.flipud(img)` if `flip_vertical=True` (default both flips on)
+2. `np.fliplr(img)` if `flip_horizontal=True`
+
+Both are controlled by separate checkboxes in both the import window toolbar and the analysis window sidebar. CLI equivalents:
+```bash
+python npz_visualizer.py demos --episode-index 1 --no-flip-horizontal --no-flip-vertical
+```
+
+### Fullscreen mode (RoboViewApp only)
+
+Triggered by F11 / Escape / "全屏" button in the playback controls. Implementation:
+- Enter: `_main_pane.forget(self._sidebar)` → hide sidebar → `self.root.state("zoomed")` → maximize window → canvas Configure event auto-resizes the Figure to fill the available space
+- Exit: restore sidebar with `_main_pane.insert(0, ...)` → restore saved geometry → `self.root.state("normal")`
+- F11/Escape use `bind_all()` (not `bind()`) to capture events regardless of which widget has focus (matplotlib canvas/toolbar would otherwise consume them)
+- `_on_canvas_configure()` has a `_configure_guard` re-entrancy lock and a 0.3-inch deadband to avoid resize feedback loops
+
+### Image-only mode (RoboViewApp only)
+
+Toggled by the "仅图像" / "全部" button below the flip checkboxes. Implementation:
+- `_toggle_image_only()` flips `self._image_only` and calls `_render_episode()`
+- `_render_image_only()`: single `ax_img` (111) filling the entire Figure with `subplots_adjust(left=0, right=1, bottom=0, top=0.95)` — all curve subplots, cursors, and value text are absent
+- `_render_full()`: the default 3×3 grid layout (image + 6 curve plots + value text)
+- `_refresh_frame()` guards against None `value_artist` via `if self.value_artist is not None:` (was `hasattr` before image-only mode was added)
+
+### Keyboard shortcuts (shared)
+
+| Key | Action |
+|-----|--------|
+| Space | Play / Pause |
+| Left / Right | Frame back / forward |
+| Home / End | First / Last frame |
+| F11 | Toggle fullscreen (RoboViewApp) / matplotlib fullscreen (visualize) |
+| Escape | Exit fullscreen (RoboViewApp only) |
+
 ## Known issues
 
 - **Joy-Con Z drift**: Z axis produces tiny per-frame drift (~1e-4 m) that accumulates but the robot doesn't execute. Consider a dead zone threshold in `_compute_action_label()` if it affects training.
