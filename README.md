@@ -6,11 +6,13 @@
 
 ```
 DatasetsCollector\
-    collect_datasets.py     # Joy-Con 遥操作采集
-    env_client.py           # Unity TCP 客户端
-    convert_to_rlds.py      # .npz → 训练格式 + norm stats
-    npz_visualizer.py       # 数据可视化 GUI (RoboView)
-    demos\                  # 采集的 .npz 输出
+    collect_datasets.py         # Joy-Con 遥操作采集
+    env_client.py               # Unity TCP 客户端
+    convert_to_rlds.py          # .npz → 训练格式 + norm stats
+    filter_idle_frames.py       # 发呆帧过滤
+    analyze_bin_distribution.py # Bin 分布分析
+    npz_visualizer.py           # 数据可视化 GUI (RoboView)
+    demos\                      # 采集的 .npz 输出
 ```
 
 ## 1. 数据采集
@@ -72,18 +74,25 @@ python filter_idle_frames.py -i ../datasets/trajectories -o ../datasets/trajecto
 
 ### 3.2 效果验证
 
-用 `analyze_bin_distribution.py`（位于 `network/scripts/`）对比过滤前后的 bin 分布：
+用 `analyze_bin_distribution.py` 对比过滤前后的 bin 分布：
 
 ```bash
 # 过滤前
-python ../network/scripts/analyze_bin_distribution.py --data_dir ./demos --output_dir ./bin_orig
+python analyze_bin_distribution.py -i ./demos -o ./bin_orig
 
 # 过滤后
-python ../network/scripts/analyze_bin_distribution.py --data_dir ./demos_filtered --output_dir ./bin_filtered
+python analyze_bin_distribution.py -i ./demos_filtered -o ./bin_filtered
 
 # 过滤后 + 5 帧累积
-python ../network/scripts/analyze_bin_distribution.py --data_dir ./demos_filtered --output_dir ./bin_step5 --step_skip 5
+python analyze_bin_distribution.py -i ./demos_filtered -o ./bin_step5 --step_skip 5
 ```
+
+Verdict 解读：
+- `EXCELLENT` (<10%) — 分布均匀，无模式坍缩
+- `GOOD` (10-20%) — 轻微峰值，可接受
+- `OK` (20-35%) — 中等峰值，建议加 step_skip
+- `WEAK` (35-50%) — 明显峰值，需要过滤 + step_skip
+- `BAD (collapse)` (>50%) — 严重模式坍缩，数据不可用
 
 ## 4. 数据可视化 (RoboView)
 
