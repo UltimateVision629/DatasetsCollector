@@ -429,9 +429,12 @@ class DemoCollector:
     # ── Episode management ─────────────────────────────────────────────
 
     def start_episode(self):
-        """Reset Unity environment and clear episode buffers."""
+        """Reset Unity, move arms to home pose, then begin recording."""
         print("\n[Collector] Starting new episode...")
-        obs = self.env.reset()
+        self.env.reset()
+        self._go_home()
+        time.sleep(0.5)  # let arms settle into home pose
+        obs = self.env.get_obs()
         # Reset Joy-Con target tracking (first frame = no delta)
         self._prev_jc_state = [None, None]
         self.episode_obs = [obs]
@@ -559,14 +562,12 @@ class DemoCollector:
 
                 # ── Step 7: Handle button events (edge-triggered) ───────
                 if button != prev_button:
-                    if button == 1:  # A button → save success + go home
+                    if button == 1:  # A button → save success, start new episode (auto home)
                         self.save_episode(success=True)
                         self.start_episode()
-                        self._go_home()
-                    elif button == -1:  # Y button → discard + go home
+                    elif button == -1:  # Y button → discard, start new episode (auto home)
                         print("[Collector] Episode discarded.")
                         self.start_episode()
-                        self._go_home()
                 prev_button = button
 
                 # ── Step 8: Timing ──────────────────────────────────────
