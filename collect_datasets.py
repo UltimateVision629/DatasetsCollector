@@ -55,27 +55,24 @@ except ImportError:
     print("  pip install joyconrobotics")
     sys.exit(1)
 
-try:
-    from lerobot_kinematics import lerobot_IK, get_robot
-except ImportError:
-    print("ERROR: lerobot_kinematics not installed.")
-    print("  pip install lerobot-kinematics")
-    sys.exit(1)
-
 # Local import — env_client.py lives in the same directory
 from env_client import LiberoUnityEnv
+
+# Unified IK backends (arm_ik.py in libero-unity/test) — collect/replay/
+# inference share the same pluggable IK.  Default keeps the original
+# lerobot_IK behavior; use --ik-backend mujoco for MuJoCo-accurate joints.
+_TEST = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "libero-unity", "test"))
+if _TEST not in sys.path:
+    sys.path.insert(0, _TEST)
+from arm_ik import create_ik, INIT_ARM_Q, CONTROL_GLIMIT  # noqa: E402
 
 # ── Constants ──────────────────────────────────────────────────────────
 JOYCON_PORT = 5555   # JoyConReceiver
 TRAIN_PORT = 5556    # TrainingServer
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "demos")
 
-CONTROL_GLIMIT = [
-    [0.125, -0.4, 0.046, -3.1, -1.5, -1.5],
-    [0.380, 0.4, 0.23, 3.1, 1.5, 1.5],
-]
 _SO100_HOME_XYZ = [0.111, 0.0, 0.098]
-_INIT_ARM_Q = np.array([-3.14, 3.14, 0.0, -1.57])
 
 
 # ── Quaternion math (Unity convention: [x, y, z, w]) ────────────────────
@@ -157,15 +154,40 @@ def _euler_zxy_to_quat(rx: float, ry: float, rz: float) -> np.ndarray:
     ])
 
 
+def _drain_joycon_feedback(sock: socket.socket) -> None:
+    """Discard Unity's joint-feedback replies so its write never blocks.
+
+    JoyConReceiver writes one feedback JSON line back per received message
+    (JoyConReceiver.cs WriteJointFeedback); nothing on this side reads it.
+    Without draining, the OS receive buffer fills after a few minutes of
+    continuous teleop, Unity's recv thread blocks inside stream.Write and
+    stops reading → the arm freezes at the last pose and Python's sendall
+    later blocks too (the "freeze ~7 episodes into a batch" bug — time-based,
+    independent of which files are replayed).
+    """
+    sock.setblocking(False)
+    try:
+        while True:
+            try:
+                if not sock.recv(65536):
+                    break  # peer closed
+            except (BlockingIOError, InterruptedError):
+                break  # buffer drained
+    finally:
+        sock.setblocking(True)
+
+
 class DemoCollector:
     """Collects demonstrations using Joy-Con teleop + Unity TrainingServer."""
 
-    def __init__(self):
+    def __init__(self, ik_backend: str = "lerobot"):
         self.joycon_sock: socket.socket = None
         self.env: LiberoUnityEnv = None
-        self.robot = get_robot("so100")
-        self.current_arm_q_r = _INIT_ARM_Q.copy()
-        self.current_arm_q_l = _INIT_ARM_Q.copy()
+        # ONE IK INSTANCE PER ARM (MuJoCoIK tracks a per-arm so100 warm)
+        self.ik = [create_ik(ik_backend),
+                   create_ik(ik_backend)]
+        self.current_arm_q_r = INIT_ARM_Q.copy()
+        self.current_arm_q_l = INIT_ARM_Q.copy()
         self.prev_joint_angles_0: np.ndarray = None
         self.prev_joint_angles_1: np.ndarray = None
         self.episode_obs: list = []
@@ -258,6 +280,7 @@ class DemoCollector:
             }
         data = (json.dumps(msg) + "\n").encode("utf-8")
         self.joycon_sock.sendall(data)
+        _drain_joycon_feedback(self.joycon_sock)
 
     # ── Processors (LeRobot-style: label ← teleop action processor, command ← robot action processor) ─
 
@@ -275,10 +298,11 @@ class DemoCollector:
                 continue
 
             # Reset IK warm-start so we converge to home, not current pose
+            self.ik[arm_idx].reset_warm()  # per-episode warm reset
             if arm_idx == 0:
-                self.current_arm_q_r = _INIT_ARM_Q.copy()
+                self.current_arm_q_r = INIT_ARM_Q.copy()
             else:
-                self.current_arm_q_l = _INIT_ARM_Q.copy()
+                self.current_arm_q_l = INIT_ARM_Q.copy()
 
             joints, _ = self._compute_robot_command(arm_idx, home_target.copy(), 0.0)
             if joints is not None:
@@ -292,6 +316,7 @@ class DemoCollector:
                 }
                 data = (json.dumps(msg) + "\n").encode("utf-8")
                 self.joycon_sock.sendall(data)
+                _drain_joycon_feedback(self.joycon_sock)
 
             # Reset Joy-Con internal position accumulator to home offset.
             # Without this, get_control() returns the pre-reset position and
@@ -302,6 +327,12 @@ class DemoCollector:
             # Without this, accumulated yaw offset persists across resets.
             jc.yaw_diff = 0.0
             jc.orientation_sensor.set_yaw_diff(0.0)
+
+            # Reset the fused orientation vectors (roll/pitch/yaw) so the arm
+            # returns to home with a neutral wrist.  roll/pitch are gyro-
+            # integrated and would otherwise keep the tilt held at Y-press
+            # time (joyconrobotics' own reset uses reset_yaw + set_yaw_diff).
+            jc.orientation_sensor.reset_yaw()
 
             # Reset gripper state to open, matching the home pose.
             jc.gripper_state = jc.gripper_open
@@ -324,32 +355,22 @@ class DemoCollector:
         Returns:
             (joint_angles_6d, gripper, button) or (None, gripper, button) on IK failure
         """
-        # Clamp to workspace limits
-        for i in range(6):
-            target_pose[i] = max(CONTROL_GLIMIT[0][i], min(CONTROL_GLIMIT[1][i], target_pose[i]))
-
-        x_r, _, z_r, roll_r, pitch_r, yaw_r = target_pose
-        y_r = 0.01  # fixed lateral offset
-
-        # Transformations matching lerobot_joycon_gpos_real.py
-        pitch_r = -pitch_r
-        roll_r = roll_r - math.pi / 2
-
+        # Delegate to the pluggable IK backend (arm_ik.py).
+        # Gripper stays RAW (0/1) — JoyConReceiver SetJoint() passes it
+        # straight to the Jaw actuator (historical collect behavior, 勿改).
         current_arm_q = self.current_arm_q_r if arm_index == 0 else self.current_arm_q_l
 
-        right_target_gpos = np.array([x_r, y_r, z_r, roll_r, pitch_r, 0.0])
-        qpos_inv, ik_success = lerobot_IK(current_arm_q, right_target_gpos, robot=self.robot)
-
-        if ik_success:
-            target_qpos = np.concatenate(([yaw_r], qpos_inv[:4], [gripper_state]))
-            # Update current arm q for next IK call
-            if arm_index == 0:
-                self.current_arm_q_r = target_qpos[1:5].copy()
-            else:
-                self.current_arm_q_l = target_qpos[1:5].copy()
-            return target_qpos, gripper_state
-        else:
+        joints5, new_q = self.ik[arm_index].solve(target_pose, gripper_state, current_arm_q)
+        if joints5 is None:
             return None, gripper_state
+
+        target_qpos = np.concatenate((joints5, [gripper_state]))
+        # Update current arm q for next IK call
+        if arm_index == 0:
+            self.current_arm_q_r = new_q
+        else:
+            self.current_arm_q_l = new_q
+        return target_qpos, gripper_state
 
     def _compute_action_label(self, arm_index: int, target_pose: list, gripper_state: float) -> np.ndarray:
         """Teleop action processor: Joy-Con target → 7-dim EEF delta.
@@ -450,9 +471,7 @@ class DemoCollector:
             print("[Collector] Empty episode, skipping save.")
             return
 
-        lang = self.env.get_task()
-        if not lang:
-            lang = "pick_up_the_block"
+        lang = self.language_instruction
 
         # Sanitize for filename: lowercase, replace spaces/slashes with underscores
         lang_slug = lang.lower().replace(" ", "_").replace("/", "_").replace("\\", "_")
@@ -551,6 +570,7 @@ class DemoCollector:
                 if msg:
                     data = (json.dumps(msg) + "\n").encode("utf-8")
                     self.joycon_sock.sendall(data)
+                    _drain_joycon_feedback(self.joycon_sock)
                 time.sleep(0.01)  # give Unity time to apply
 
                 # ── Step 5: Get observation from TrainingServer ──────────
@@ -591,7 +611,27 @@ class DemoCollector:
 
 
 def main():
-    collector = DemoCollector()
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ik-backend", default="lerobot",
+                        choices=["lerobot", "mujoco", "placo"],
+                        help="IK backend: lerobot (default, original behavior), "
+                             "mujoco (MuJoCo-accurate), placo (stub)")
+    args = parser.parse_args()
+
+    collector = DemoCollector(ik_backend=args.ik_backend)
+
+    # ── Language instruction: entered on the command line (not Unity) ──
+    # Prompt FIRST so the operator has time to focus Unity while the script
+    # connects / returns home; blank keeps the default.
+    default_lang = "pick up the red block"
+    try:
+        lang = input(f"  Language instruction [{default_lang}]: ").strip()
+    except EOFError:
+        lang = ""
+    collector.language_instruction = lang or default_lang
+    print(f"  Instruction: {collector.language_instruction}")
+
     try:
         collector.init_joycon()
         collector.connect_joycon_server()

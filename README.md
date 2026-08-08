@@ -32,6 +32,21 @@ python collect_datasets.py
 - A 键 → 保存成功 episode
 - Y 键 → 丢弃并复位机械臂
 
+### IK 后端配置
+
+采集脚本支持可插拔 IK 后端，通过 `--ik-backend` 切换（默认 `lerobot`）：
+
+```bash
+python collect_datasets.py                # 默认 lerobot（原行为）
+python collect_datasets.py --ik-backend mujoco   # MuJoCo 精确 IK（建议新采集用）
+```
+
+| 后端 | 说明 |
+|------|------|
+| `lerobot` (默认) | C 扩展 lerobot_IK，与 MuJoCo 模型差 30-50cm，操作员在回路中视觉补偿 |
+| `mujoco` | MuJoCo Python FK + scipy IK，与 Unity 同一模型，手臂执行更精确 |
+| `placo` | stub（placo 未安装/未接 URDF 帧转换） |
+
 输出：`demos/episode_XXXX_<task>_<timestamp>_success.npz`
 
 ## 2. 格式转换

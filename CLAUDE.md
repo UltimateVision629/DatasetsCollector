@@ -63,9 +63,16 @@ Per arm: `[dx, dy, dz, dRx, dRy, dRz, gripper]`
 
 - `dx, dy, dz`: EEF position delta in meters
 - `dRx, dRy, dRz`: axis-angle rotation delta = rotation axis × rotation angle in radians
-- `gripper`: absolute gripper target (0=open, 1=closed)
+- `gripper`: absolute gripper target — **joyconrobotics 语义: 1=open, 0=close**（`joyconrobotics.py:198` 源码注释明确；旧文档写成 0=open 是错的）
 
 **Action order in 14-dim array**: `[R_dx,R_dy,R_dz,R_dRx,R_dRy,R_dRz,R_grip, L_dx,L_dy,L_dz,L_dRx,L_dRy,L_dRz,L_grip]`
+
+### Gripper 执行语义（勿与 label 混淆）
+
+- 训练 label 是 sender-side 意图（上面 0/1）
+- **发送给 Unity 的 Jaw 目标 = raw 0/1 直通**（`target_qpos` 最后一个元素）——Unity `MjJoyConController.SetJoint("Jaw", v)` 把值原样写 MuJoCo position actuator ctrl
+- **MuJoCo Jaw 关节/ctrl 范围**: `[-0.174, 1.75]` rad，-0.174 = 闭合位、1.75 = 全开位。raw 直通意味着 0 → 行程中间（半开）、1 → 近全开——**物理上爪到不了 -0.174 完全闭合位**，这是已知的旧行为，数据 label 不受影响
+- 对比：`replay_action_via_ik.py` 有 `gripper_to_jaw()`（`-0.174 + 1.924*g`）让重放时爪真正闭合；**collect 刻意保持 raw 直通**（2026-08-06 用户决定不重采，勿改回映射，除非重新采集）
 
 ## Joy-Con teleop
 
@@ -84,15 +91,13 @@ Computes sender-side 7-dim EEF delta from consecutive Joy-Con target poses:
 
 ### Robot action processor: `_compute_robot_command(arm_index, target_pose, gripper)`
 
-Computes joint angles via `lerobot_IK`:
+Delegates to the **pluggable IK backend** (`libero-unity/test/arm_ik.py`, `--ik-backend {lerobot,mujoco,placo}`, 默认 `lerobot` 保持原行为；`mujoco` 为 MuJoCo 精确关节角，与 Unity 同一模型):
 ```python
-y_r = 0.01                         # fixed lateral offset
-pitch_r = -pitch_r
-roll_r = roll_r - math.pi / 2
-right_target_gpos = [x_r, y_r, z_r, roll_r, pitch_r, 0.0]  # yaw=0; yaw is handled by base joint
-# → lerobot_IK() → joints
-# → Base yaw: yaw_r → J0 (target_qpos[0])
+joints5, new_q = self.ik[arm_index].solve(target_pose, gripper_state, current_arm_q)
+target_qpos = np.concatenate((joints5, [gripper_state]))  # raw gripper 直通
 ```
+
+每个臂一个 IK 实例（MuJoCoIK 内部跟踪 per-arm lerobot 翻译 warm，episode 重置时调用 `reset_warm()`）。
 
 **IMPORTANT**: `[x_r, y_r, z_r]` is in a LOCAL cylindrical coordinate frame that rotates with the base joint (yaw). It is NOT the same as the MuJoCo world-frame `obs["robot0_eef_pos"]`.
 
@@ -102,7 +107,7 @@ Converts extrinsic Z-X-Y Euler angles to quaternion [x, y, z, w], matching Unity
 
 ### Home reset (`_go_home`)
 
-On A/Y button press, resets IK warm-start to `_INIT_ARM_Q`, computes home joint angles via IK, sends via JoyConReceiver, and resets Joy-Con internal state:
+On A/Y button press, resets IK warm-start to `INIT_ARM_Q` (5-DOF, from `arm_ik.py`), computes home joint angles via IK, sends via JoyConReceiver, and resets Joy-Con internal state:
 - `jc.set_position(list(_SO100_HOME_XYZ))` — reset position accumulator
 - `jc.yaw_diff = 0.0` — reset accumulated yaw
 - `jc.gripper_state = jc.gripper_open` — reset gripper to open
