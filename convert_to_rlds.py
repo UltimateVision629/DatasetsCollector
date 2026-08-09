@@ -18,6 +18,8 @@ from typing import Dict, List
 
 import numpy as np
 
+from static_frame_filter import filter_trajectories
+
 
 def load_trajectories(input_dir: str) -> List[dict]:
     """Load all .npz files from input_dir."""
@@ -197,6 +199,10 @@ def main():
     parser = argparse.ArgumentParser(description="Convert demos to VLA-Adapter format")
     parser.add_argument("--input_dir", type=str, required=True, help="Directory of .npz demo files")
     parser.add_argument("--output_dir", type=str, default="./dataset", help="Output dataset directory")
+    parser.add_argument("--static_max_eps", type=float, default=0.002,
+                        help="静止帧判定阈值 max|delta| < eps（0 = 不过滤；行业区间 0.001-0.01）")
+    parser.add_argument("--static_max_run", type=int, default=16,
+                        help="连续静止段超过 N 帧则整段裁剪（0 = 不过滤；短停顿保留）")
     args = parser.parse_args()
 
     # Load
@@ -209,6 +215,12 @@ def main():
     lengths = [len(t["action"]) for t in trajectories]
     print(f"  count={len(trajectories)}, total_steps={sum(lengths)}")
     print(f"  min_len={min(lengths)}, max_len={max(lengths)}, mean_len={np.mean(lengths):.0f}")
+
+    # 静止帧过滤（数据初始化入口，stats 之前 → 归一化统计基于过滤后分布）
+    trajectories = filter_trajectories(trajectories, args.static_max_eps, args.static_max_run)
+    if len(trajectories) == 0:
+        print("ERROR: All trajectories filtered out (all static)!")
+        return
 
     # Compute norm stats
     norm_stats = compute_norm_stats(trajectories)
