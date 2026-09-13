@@ -27,7 +27,7 @@ def compute_static_mask(actions: np.ndarray, eps: float = 0.002) -> np.ndarray:
     return np.abs(actions[:, DELTA_DIMS]).max(axis=1) < eps
 
 
-def trim_static_frames(static: np.ndarray, max_run: int = 16) -> np.ndarray:
+def trim_static_frames(static: np.ndarray, max_run: int = 5) -> np.ndarray:
     """[T] static 掩码 → [T] keep 掩码（True = 保留该帧）。
 
     规则：起始静止段全裁；其余连续静止段 > max_run 帧全裁；短停顿保留。
@@ -51,7 +51,7 @@ def trim_static_frames(static: np.ndarray, max_run: int = 16) -> np.ndarray:
     return keep
 
 
-def filter_trajectory(traj: dict, eps: float = 0.002, max_run: int = 16) -> Optional[dict]:
+def filter_trajectory(traj: dict, eps: float = 0.002, max_run: int = 5) -> Optional[dict]:
     """按 keep 掩码裁剪 traj 的全部数组键并重排下标。
 
     eps <= 0 或 max_run <= 0 → 不过滤，原样返回。
@@ -76,7 +76,7 @@ def filter_trajectory(traj: dict, eps: float = 0.002, max_run: int = 16) -> Opti
 
 
 def filter_trajectories(trajectories: List[dict], eps: float = 0.002,
-                        max_run: int = 16) -> List[dict]:
+                        max_run: int = 5) -> List[dict]:
     """批量过滤。打印每条裁剪前后长度与整体统计，返回过滤后的轨迹列表。"""
     if eps <= 0 or max_run <= 0:
         print(f"[StaticFilter] 已禁用（eps={eps}, max_run={max_run}），{len(trajectories)} 条原样保留")

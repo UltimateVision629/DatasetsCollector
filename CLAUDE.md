@@ -209,6 +209,19 @@ Toggled by the "仅图像" / "全部" button below the flip checkboxes. Implemen
 | F11 | Toggle fullscreen (RoboViewApp) / matplotlib fullscreen (visualize) |
 | Escape | Exit fullscreen (RoboViewApp only) |
 
+## 采集 IK 后端与手感（2026-09-01，性能实测 2026-09-02）
+
+- **必须用 `--ik-backend mujoco` 采集**：lerobot 后端执行偏差 30-50cm，操作员视觉补偿会被固化进 label（label 比 MuJoCo 实际位移少 ~13%，中位比值 0.87），推理用 mujoco 后端精确执行 label → 必然欠程。**采集前后跑 `check_label_vs_eef.py` 验证比值 0.9-1.1**
+- **`--ik-tol`（默认 1e-3）**：mujoco 后端 least_squares 容差。⚠️ 实测只快 ~9%（nfev 本来就 3-5 次，tol 松紧几乎不改变迭代数）——**不是性能主战场**。`DemoCollector.__init__` 里必须 `self.ik_tol = ik_tol`（曾漏赋值）
+- **性能实测分解（`libero-unity/test/benchmark_ik_perf.py`，2026-09-02）**：
+  - 每帧每臂成本：so100 翻译层 **1.43ms → 0.85ms**（ftol 1e-8→1e-2 后）+ MuJoCo arm_ik.ik 0.77-0.82ms（1e-3）。lerobot 后端总计 0.89ms、mujoco 1.72ms
+  - **翻译层 `so100_ik` 曾是最大单项且两后端共有**——lerobot 后端**不是解析解**，它唯一的成本就是翻译层数值 LS（原 ftol 硬编码 1e-8）。翻译解只作 MuJoCo FK/IK 目标，0.03mm 误差无感 → `so100_chain.so100_ik(ftol=1e-2)` 已默认放宽
+  - 稳态瓶颈 = 每次 least_squares 迭代的固定开销 ~250-370µs（scipy TRF 有限差分 + numpy 小矩阵），不是迭代次数
+  - **偶发 10-16ms 卡帧根因 = Python GC**（scipy 每帧小对象触发 gen1/2 收集）；`collect_datasets.py run()` 已 `gc.disable()`（实测卡帧 max 16.5→5.4ms；对象由引用计数即时释放，无循环引用，安全）
+  - CPU 计算，**换显卡无效**
+- **摇杆输入是开关式恒速**（joyconrobotics `common_update()`）：>4000 全速 0.1 m/s / <1000 反向 / **1000-4000 死区**——"推好久才动"部分是死区 + 跟随暂态，非比例控制。手腕 roll/pitch 另有低通滤波（α=0.08，~0.2s 滞后）
+- 手感仍重可调：Unity `MjJoyConController.MaxJointDelta 0.3→0.6`、XML `kp 50→80 / forcerange 3.5→5.0`（XML 未被 git 跟踪，改前备份）
+
 ## Known issues
 
 - **Joy-Con Z drift**: Z axis produces tiny per-frame drift (~1e-4 m) that accumulates but the robot doesn't execute. Consider a dead zone threshold in `_compute_action_label()` if it affects training.
