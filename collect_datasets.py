@@ -64,7 +64,7 @@ from env_client import LiberoUnityEnv
 # inference share the same pluggable IK.  Default keeps the original
 # lerobot_IK behavior; use --ik-backend mujoco for MuJoCo-accurate joints.
 _TEST = os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "libero-unity", "test"))
+    os.path.dirname(__file__), "..", "unity-robot-env", "test"))
 if _TEST not in sys.path:
     sys.path.insert(0, _TEST)
 from arm_ik import create_ik, INIT_ARM_Q, CONTROL_GLIMIT  # noqa: E402
