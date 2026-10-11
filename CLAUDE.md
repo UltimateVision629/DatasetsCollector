@@ -16,6 +16,7 @@ DatasetsCollector\
     env_client.py           # TCP client → Unity TrainingServer (5556)
     convert_to_rlds.py      # .npz → training format + norm stats
     npz_visualizer.py       # Data visualization GUI (RoboView)
+    review_client.py        # RECAP 成功候选逐集审阅 GUI（A/R/S → decisions JSONL）
     demos\                  # Collected .npz output
 ```
 
